@@ -1,2 +1,7 @@
-[tool.vercel] 
-entrypoint = "web_app:app" 
+[project]
+name = "nfe-distancia"
+version = "1.0.0"
+dependencies = ["flask>=2.3.0", "requests>=2.31.0"]
+
+[tool.vercel]
+entrypoint = "web_app:app"
