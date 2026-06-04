@@ -25,6 +25,8 @@ HTML = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Distância NF-e</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -91,6 +93,9 @@ input[type=text].invalid{border-color:var(--error)}
 .nivel-badge{display:inline-block;margin-top:.4rem;font-size:.68rem;font-family:'IBM Plex Mono',monospace;padding:.15rem .55rem;border-radius:20px}
 .nivel-ok{background:rgba(0,212,170,.1);color:var(--accent);border:1px solid rgba(0,212,170,.25)}
 .nivel-warn{background:rgba(245,166,35,.1);color:var(--warn);border:1px solid rgba(245,166,35,.25)}
+.map-layer-btn{background:var(--surface);border:1px solid var(--border);color:var(--muted);font-size:.72rem;padding:.3rem .7rem;border-radius:4px;cursor:pointer;font-family:'IBM Plex Mono',monospace;transition:all .2s}
+.map-layer-btn:hover{border-color:var(--accent);color:var(--text)}
+.map-layer-btn.active{background:var(--accent);color:#0f1117;border-color:var(--accent);font-weight:600}
 .error-msg{background:rgba(255,95,95,.08);border:1px solid rgba(255,95,95,.3);border-radius:4px;padding:1rem;color:var(--error);font-size:.85rem;display:none;margin-top:1rem}
 .spinner{display:none;text-align:center;padding:1rem 0;color:var(--muted);font-size:.85rem}
 .spinner::before{content:'';display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:.5rem}
@@ -147,6 +152,24 @@ input[type=text].invalid{border-color:var(--error)}
 
     <div class="spinner" id="spinner">Consultando e calculando rota...</div>
     <div class="error-msg" id="errorMsg"></div>
+  </div>
+
+  <!-- Mapa da rota -->
+  <div id="map-section" style="display:none;margin-top:1.5rem">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem">
+      <div style="font-size:.75rem;font-family:'IBM Plex Mono',monospace;color:var(--muted);letter-spacing:.08em;text-transform:uppercase">TRAJETO</div>
+      <div style="display:flex;gap:.4rem">
+        <button onclick="setLayer('street')"  id="btn-street"  class="map-layer-btn active">🗺 Mapa</button>
+        <button onclick="setLayer('sat')"     id="btn-sat"     class="map-layer-btn">🛰 Satélite</button>
+      </div>
+    </div>
+    <div id="map" style="height:400px;border-radius:8px;border:1px solid var(--border);overflow:hidden"></div>
+    <div id="map-hint" style="margin-top:.5rem;font-size:.72rem;font-family:'IBM Plex Mono',monospace;color:var(--muted);text-align:center">
+      💡 Arraste os marcadores <span style="color:#00d4aa">●</span> origem e <span style="color:#ff5f5f">●</span> destino para ajustar o ponto e recalcular a rota
+    </div>
+    <div id="map-recalc" style="display:none;margin-top:.5rem;text-align:center;font-size:.8rem;font-family:'IBM Plex Mono',monospace;color:var(--accent)">
+      ⟳ Recalculando rota...
+    </div>
   </div>
 
   <!-- Resultado XML -->
@@ -338,6 +361,102 @@ function renderResult(data, aba){
   setBadge('nivelDest-'+aba, data.nivel_dest);
   if(aba==='xml') resultadoXml=true; else resultadoCnpj=true;
   document.getElementById(id).style.display='block';
+  renderMapa(data);
+}
+
+let _map = null, _rotaLine = null, _markerA = null, _markerB = null;
+let _layers = {}, _activeLayer = 'street';
+let _lastData = null;
+
+function setLayer(name){
+  if(!_map) return;
+  if(_layers[_activeLayer]) _map.removeLayer(_layers[_activeLayer]);
+  _map.addLayer(_layers[name]);
+  _activeLayer = name;
+  document.querySelectorAll('.map-layer-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-'+name).classList.add('active');
+}
+
+function renderMapa(data){
+  if(!data.coords || !data.lat1) return;
+  _lastData = data;
+  document.getElementById('map-section').style.display='block';
+
+  const latlngs = data.coords.map(c => [c[1], c[0]]);
+
+  if(_map){ _map.remove(); _map=null; _layers={}; }
+
+  _map = L.map('map', {zoomControl:true});
+
+  // Camadas
+  _layers.street = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    attribution:'© OpenStreetMap', maxZoom:19});
+
+  _layers.sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{
+    attribution:'© Esri World Imagery', maxZoom:19});
+
+  _layers[_activeLayer].addTo(_map);
+
+  // Linha da rota
+  _rotaLine = L.polyline(latlngs, {color:'#00d4aa', weight:5, opacity:.9}).addTo(_map);
+
+  // Ícones
+  const mkIcon = (cor, label) => L.divIcon({className:'', html:`
+    <div style="display:flex;flex-direction:column;align-items:center">
+      <div style="background:${cor};color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,.4);font-family:monospace">${label}</div>
+      <div style="width:2px;height:8px;background:${cor}"></div>
+      <div style="width:10px;height:10px;background:${cor};border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.3)"></div>
+    </div>`, iconSize:[80,40], iconAnchor:[40,40]});
+
+  _markerA = L.marker([data.lat1, data.lon1], {
+    icon: mkIcon('#00d4aa', '🏭 '+data.emitente.nome.split(' ').slice(0,2).join(' ')),
+    draggable: true
+  }).addTo(_map).bindPopup(`<b>🏭 Emitente</b><br>${data.emitente.nome}<br><small>${data.origem_resolvida}</small><br><small style="color:#888">Arraste para ajustar</small>`);
+
+  _markerB = L.marker([data.lat2, data.lon2], {
+    icon: mkIcon('#ff5f5f', '📦 '+data.destinatario.nome.split(' ').slice(0,2).join(' ')),
+    draggable: true
+  }).addTo(_map).bindPopup(`<b>📦 Destinatário</b><br>${data.destinatario.nome}<br><small>${data.destino_resolvido}</small><br><small style="color:#888">Arraste para ajustar</small>`);
+
+  // Drag events
+  _markerA.on('dragend', () => recalcularRota());
+  _markerB.on('dragend', () => recalcularRota());
+
+  _map.fitBounds(_rotaLine.getBounds(), {padding:[40,40]});
+}
+
+async function recalcularRota(){
+  if(!_markerA || !_markerB) return;
+  const hint = document.getElementById('map-recalc');
+  hint.style.display = 'block';
+
+  const a = _markerA.getLatLng();
+  const b = _markerB.getLatLng();
+
+  try{
+    const resp = await fetch('/recalcular', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({lat1:a.lat, lon1:a.lng, lat2:b.lat, lon2:b.lng})
+    });
+    const data = await resp.json();
+    if(data.erro){ hint.style.display='none'; return; }
+
+    // Atualiza linha da rota
+    if(_rotaLine) _map.removeLayer(_rotaLine);
+    const latlngs = data.coords.map(c => [c[1], c[0]]);
+    _rotaLine = L.polyline(latlngs, {color:'#00d4aa', weight:5, opacity:.9}).addTo(_map);
+
+    // Atualiza distância e duração em todos os blocos visíveis
+    ['xml','cnpj'].forEach(aba => {
+      const d = document.getElementById('distancia-'+aba);
+      const t = document.getElementById('duracao-'+aba);
+      if(d) d.textContent = data.distancia_texto;
+      if(t) t.textContent = data.duracao_texto;
+    });
+
+  } catch(e){ console.error(e); }
+  finally { hint.style.display = 'none'; }
 }
 
 function setBadge(id,nivel){
@@ -424,6 +543,12 @@ def consultar_cnpj(cnpj: str) -> dict:
     }
 
 
+def _eh_rodovia(rua: str) -> bool:
+    """Detecta se o logradouro é uma rodovia/estrada (geocodificação imprecisa)."""
+    padroes = r'(rod|rodovia|estrada|estr|br-|br |sc-|sc |rs-|rs |sp-|sp |pr-|pr |mt-|mt |mg-|mg |km |s/n|sn)'
+    return bool(re.search(padroes, rua.lower()))
+
+
 def geocodificar(dados: dict):
     headers = {'User-Agent': 'nfe-distancia-app/1.0'}
     rua = dados.get('logradouro', '').strip()
@@ -433,38 +558,52 @@ def geocodificar(dados: dict):
     cep = re.sub(r'\D', '', dados.get('cep', '')).zfill(8)
     cep_fmt = f"{cep[:5]}-{cep[5:]}" if len(cep) == 8 else cep
 
+    # Remove vírgulas e conteúdo após vírgula no logradouro (ex: "SC 355,km 24,4" → "SC 355")
+    rua_limpa = re.split(r',', rua)[0].strip()
+
     tentativas = []
+    rodovia = _eh_rodovia(rua)
 
-    # 1. Endereço completo (rua + número + município + UF + CEP)
-    if rua and num and mun and uf and cep:
-        tentativas.append((f"{rua}, {num}, {mun}, {uf}, {cep_fmt}, Brasil", "endereço completo"))
+    if rodovia:
+        # Tenta nome da rodovia simplificado + município
+        rod_simples = re.sub(r'[,.].*','', rua).strip()  # "Rodovia SC 355,km 24,4" → "Rodovia SC 355"
+        rod_codigo  = re.search(r'((?:BR|SC|RS|SP|PR|MT|MG|MS|GO|BA|PE|RJ|ES|CE|MA|PA|AM|RO|AC|AP|RR|TO|SE|AL|PB|PI|RN)-?\s*\d+)', rua, re.IGNORECASE)
+        rod_num     = rod_codigo.group(1).replace(' ','-') if rod_codigo else ''
 
-    # 2. Rua + número + município + UF (sem CEP)
-    if rua and num and mun and uf:
-        tentativas.append((f"{rua}, {num}, {mun}, {uf}, Brasil", "endereço completo"))
+        bairro = dados.get('bairro','').strip()
 
-    # 3. Rua + município + UF (sem número)
-    if rua and mun and uf:
-        tentativas.append((f"{rua}, {mun}, {uf}, Brasil", "logradouro sem número"))
+        # 1. Bairro + município (mais preciso que CEP rural)
+        if bairro and mun and uf:
+            tentativas.append((f"{bairro}, {mun}, {uf}, Brasil", "bairro + município"))
 
-    # 4. CEP + município + UF (ancora o CEP na cidade certa)
-    if cep and mun and uf:
-        tentativas.append((f"{cep_fmt}, {mun}, {uf}, Brasil", "CEP"))
+        # 2. Rodovia simplificada + município
+        if rod_num and mun and uf:
+            tentativas.append((f"Rodovia {rod_num}, {mun}, {uf}, Brasil", "rodovia + município"))
+        elif rod_simples and mun and uf:
+            tentativas.append((f"{rod_simples}, {mun}, {uf}, Brasil", "rodovia + município"))
 
-    # 5. Marco zero — praça central
+        # 3. CEP ancorado no município
+        if cep and mun and uf:
+            tentativas.append((f"{cep_fmt}, {mun}, {uf}, Brasil", "CEP"))
+
+        # 4. Só município
+        if mun and uf:
+            tentativas.append((f"{mun}, {uf}, Brasil", "município"))
+    else:
+        # Endereços normais: tenta do mais ao menos específico
+        if rua_limpa and num and mun and uf and cep:
+            tentativas.append((f"{rua_limpa}, {num}, {mun}, {uf}, {cep_fmt}, Brasil", "endereço completo"))
+        if rua_limpa and num and mun and uf:
+            tentativas.append((f"{rua_limpa}, {num}, {mun}, {uf}, Brasil", "endereço completo"))
+        if rua_limpa and mun and uf:
+            tentativas.append((f"{rua_limpa}, {mun}, {uf}, Brasil", "logradouro sem número"))
+        if cep and mun and uf:
+            tentativas.append((f"{cep_fmt}, {mun}, {uf}, Brasil", "CEP"))
+
+    # Fallbacks comuns a todos
     if mun and uf:
         tentativas.append((f"Praça Central, {mun}, {uf}, Brasil", "marco zero (praça central)"))
-
-    # 6. Marco zero — prefeitura
-    if mun and uf:
         tentativas.append((f"Prefeitura Municipal de {mun}, {uf}, Brasil", "marco zero (prefeitura)"))
-
-    # 7. Marco zero — câmara municipal
-    if mun and uf:
-        tentativas.append((f"Câmara Municipal de {mun}, {uf}, Brasil", "marco zero (câmara municipal)"))
-
-    # 8. Só município + UF (último recurso)
-    if mun and uf:
         tentativas.append((f"{mun}, {uf}, Brasil", "município"))
 
     for i, (query, nivel) in enumerate(tentativas):
@@ -494,7 +633,7 @@ def geocodificar(dados: dict):
 
 def calcular_rota(lat1, lon1, lat2, lon2):
     url  = f'http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}'
-    resp = requests.get(url, params={'overview': 'false'}, timeout=15)
+    resp = requests.get(url, params={'overview': 'full', 'geometries': 'geojson'}, timeout=15)
     resp.raise_for_status()
     data = resp.json()
     if data.get('code') != 'Ok':
@@ -505,7 +644,16 @@ def calcular_rota(lat1, lon1, lat2, lon2):
     dist_txt = f"{round(dist_m/1000)} km" if dist_m >= 1000 else f"{dist_m:.0f} m"
     h, m = int(dur_s // 3600), int((dur_s % 3600) // 60)
     dur_txt = f"{h}h {m}min" if h > 0 else f"{m} min"
-    return {'distancia_texto': dist_txt, 'distancia_metros': dist_m, 'duracao_texto': dur_txt}
+    # Geometria da rota — lista de [lon, lat]
+    coords = rota['geometry']['coordinates']
+    return {
+        'distancia_texto': dist_txt,
+        'distancia_metros': dist_m,
+        'duracao_texto': dur_txt,
+        'coords': coords,  # [[lon, lat], ...]
+        'lat1': lat1, 'lon1': lon1,
+        'lat2': lat2, 'lon2': lon2,
+    }
 
 
 def montar_resposta(emit, dest):
@@ -520,6 +668,8 @@ def montar_resposta(emit, dest):
         'destino_resolvido': end2,
         'nivel_emit':        nivel1,
         'nivel_dest':        nivel2,
+        'lat1': lat1, 'lon1': lon1,
+        'lat2': lat2, 'lon2': lon2,
         'emitente':          {'nome': emit['nome'], 'cnpj': emit['cnpj']},
         'destinatario':      {'nome': dest['nome'], 'cnpj': dest['cnpj']},
     }
@@ -579,6 +729,18 @@ def consulta_cnpj_preview():
         return jsonify({'erro': str(e)}), 400
     except Exception as e:
         return jsonify({'erro': str(e)}), 500
+
+
+@app.route('/recalcular', methods=['POST'])
+def recalcular():
+    try:
+        body = request.get_json(force=True)
+        lat1 = float(body['lat1']); lon1 = float(body['lon1'])
+        lat2 = float(body['lat2']); lon2 = float(body['lon2'])
+        resultado = calcular_rota(lat1, lon1, lat2, lon2)
+        return jsonify(resultado)
+    except Exception as e:
+        return jsonify({'erro': str(e)}), 400
 
 
 if __name__ == '__main__':
